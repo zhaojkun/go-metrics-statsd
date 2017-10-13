@@ -17,7 +17,7 @@ func floatEquals(a, b float64) bool {
 }
 
 func ExampleStatsD() {
-	go StatsD(metrics.DefaultRegistry, 1*time.Second, "some.prefix", "localhost:7524")
+	go StatsD(metrics.DefaultRegistry, "some.prefix", "localhost:7524")
 }
 
 func ExampleStatsDWithConfig() {

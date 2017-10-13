@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -13,39 +14,71 @@ import (
 	metrics "github.com/rcrowley/go-metrics"
 )
 
-// StatsDConfig provides a container with
+// Config provides a container with
 // configuration parameters for the StatsD exporter
 type Config struct {
-	Addr          string           // Network address to connect to
-	Registry      metrics.Registry // Registry to be exported
-	FlushInterval time.Duration    // Flush interval
-	DurationUnit  time.Duration    // Time conversion unit for durations
-	Prefix        string           // Prefix to be prepended to metric names
-	Percentiles   []float64        // Percentiles to export from timers and histograms
+	Addr           string           // Network address to connect to
+	Registry       metrics.Registry // Registry to be exported
+	FlushInterval  time.Duration    // Flush interval
+	DurationUnit   time.Duration    // Time conversion unit for durations
+	Prefix         string           // Prefix to be prepended to metric names
+	Percentiles    []float64        // Percentiles to export from timers and histograms
+	Hostname       string           // Hostname to use. If not provided, it will be os.Hostname
+	EnableHostname bool             //  EnableHostname if is true,it will prefix metrics with hostname
+}
+
+func (c *Config) init() {
+	if c.Hostname == "" {
+		hostname, err := getHostname()
+		if err == nil {
+			c.Hostname = hostname
+		}
+	}
+	if c.FlushInterval == 0 {
+		c.FlushInterval = time.Second
+	}
+	if c.Percentiles == nil {
+		c.Percentiles = []float64{0.5, 0.75, 0.95, 0.99, 0.999}
+	}
 }
 
 // StatsD is a blocking exporter function which reports metrics in r
 // to a statsd server located at addr, flushing them every d duration
 // and prepending metric names with prefix.
-func StatsD(r metrics.Registry, d time.Duration, prefix string, addr string) {
+func StatsD(r metrics.Registry, prefix string, addr string) {
+	WithHostname(r, prefix, addr, false)
+}
+
+// WithHostname is a blocking exporter function just like Statsd,but it can enable hostname prefix.
+func WithHostname(r metrics.Registry, prefix string, addr string, enableHostname bool) {
 	WithConfig(Config{
-		Addr:          addr,
-		Registry:      r,
-		FlushInterval: d,
-		DurationUnit:  time.Nanosecond,
-		Prefix:        prefix,
-		Percentiles:   []float64{0.5, 0.75, 0.95, 0.99, 0.999},
+		Addr:           addr,
+		Registry:       r,
+		DurationUnit:   time.Nanosecond,
+		Prefix:         prefix,
+		EnableHostname: enableHostname,
 	})
 }
 
-// StatsDWithConfig is a blocking exporter function just like StatsD,
+// WithConfig is a blocking exporter function just like StatsD,
 // but it takes a StatsDConfig instead.
 func WithConfig(c Config) {
+	c.init()
 	for _ = range time.Tick(c.FlushInterval) {
 		if err := statsd(&c); nil != err {
 			log.Println(err)
 		}
 	}
+}
+
+func prefixFormat(c *Config, name string) string {
+	if c.Prefix != "" {
+		name = fmt.Sprintf("%s.%s", c.Prefix, name)
+	}
+	if c.EnableHostname && c.Hostname != "" {
+		name = fmt.Sprintf("%s.%s", c.Hostname, name)
+	}
+	return name
 }
 
 func statsd(c *Config) error {
@@ -65,10 +98,7 @@ func statsd(c *Config) error {
 
 	// for each metric in the registry format into statsd wireformat and send
 	c.Registry.Each(func(name string, metric interface{}) {
-		if c.Prefix != "" {
-			name = fmt.Sprintf("%s.%s", c.Prefix, name)
-		}
-
+		name = prefixFormat(c, name)
 		switch m := metric.(type) {
 		case metrics.Counter:
 			fmt.Fprintf(w, "%s.count:%d|c\n", name, m.Count())
@@ -118,4 +148,13 @@ func statsd(c *Config) error {
 	})
 
 	return nil
+}
+
+func getHostname() (string, error) {
+	name, err := os.Hostname()
+	if err != nil {
+		return "", err
+	}
+	name = strings.Replace(name, ".", "-", -1)
+	return name, nil
 }
