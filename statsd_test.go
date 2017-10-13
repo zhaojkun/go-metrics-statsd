@@ -2,14 +2,14 @@ package statsd
 
 import (
 	"bufio"
+	"bytes"
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
+	metrics "github.com/rcrowley/go-metrics"
 )
 
 func floatEquals(a, b float64) bool {
@@ -17,14 +17,12 @@ func floatEquals(a, b float64) bool {
 }
 
 func ExampleStatsD() {
-	addr, _ := net.ResolveTCPAddr("net", ":2003")
-	go StatsD(metrics.DefaultRegistry, 1*time.Second, "some.prefix", addr)
+	go StatsD(metrics.DefaultRegistry, 1*time.Second, "some.prefix", "localhost:7524")
 }
 
 func ExampleStatsDWithConfig() {
-	addr, _ := net.ResolveTCPAddr("net", ":2003")
-	go StatsDWithConfig(StatsDConfig{
-		Addr:          addr,
+	go WithConfig(Config{
+		Addr:          "localhost:7524",
 		Registry:      metrics.DefaultRegistry,
 		FlushInterval: 1 * time.Second,
 		DurationUnit:  time.Millisecond,
@@ -32,22 +30,25 @@ func ExampleStatsDWithConfig() {
 	})
 }
 
-func NewTestServer(t *testing.T, prefix string) (map[string]float64, net.Listener, metrics.Registry, StatsDConfig, *sync.WaitGroup) {
+func NewTestServer(t *testing.T, prefix string) (map[string]float64, net.PacketConn, metrics.Registry, Config, chan bool) {
+	addr := "127.0.0.1:7524"
 	res := make(map[string]float64)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		t.Fatal("could not start dummy server:", err)
 	}
-
-	var wg sync.WaitGroup
+	got := make(chan bool, 1)
 	go func() {
+		buf := make([]byte, 1500)
 		for {
-			conn, err := ln.Accept()
+			n, _, err := ln.ReadFrom(buf[:])
 			if err != nil {
-				t.Fatal("dummy server error:", err)
+				got <- true
+				t.Log(err)
+				return
 			}
-			r := bufio.NewReader(conn)
+			r := bufio.NewReader(bytes.NewReader(buf[:n]))
 			line, err := r.ReadString('\n')
 			for err == nil {
 				parts := strings.Split(line, ":")
@@ -58,15 +59,14 @@ func NewTestServer(t *testing.T, prefix string) (map[string]float64, net.Listene
 				res[parts[0]] = res[parts[0]] + i
 				line, err = r.ReadString('\n')
 			}
-			wg.Done()
-			conn.Close()
+
 		}
 	}()
 
 	r := metrics.NewRegistry()
 
-	c := StatsDConfig{
-		Addr:          ln.Addr().(*net.TCPAddr),
+	c := Config{
+		Addr:          addr,
 		Registry:      r,
 		FlushInterval: 10 * time.Millisecond,
 		DurationUnit:  time.Millisecond,
@@ -74,52 +74,45 @@ func NewTestServer(t *testing.T, prefix string) (map[string]float64, net.Listene
 		Prefix:        prefix,
 	}
 
-	return res, ln, r, c, &wg
+	return res, ln, r, c, got
 }
 
 func TestWrites(t *testing.T) {
-	res, l, r, c, wg := NewTestServer(t, "foobar")
-	defer l.Close()
+	res, l, r, c, got := NewTestServer(t, "foobar")
 
 	metrics.GetOrRegisterCounter("foo", r).Inc(2)
 
 	// TODO: Use a mock meter rather than wasting 10s to get a QPS.
 	for i := 0; i < 10*4; i++ {
 		metrics.GetOrRegisterMeter("bar", r).Mark(1)
-		time.Sleep(250 * time.Millisecond)
 	}
-
 	metrics.GetOrRegisterTimer("baz", r).Update(time.Second * 5)
 	metrics.GetOrRegisterTimer("baz", r).Update(time.Second * 4)
 	metrics.GetOrRegisterTimer("baz", r).Update(time.Second * 3)
 	metrics.GetOrRegisterTimer("baz", r).Update(time.Second * 2)
 	metrics.GetOrRegisterTimer("baz", r).Update(time.Second * 1)
 
-	wg.Add(1)
 	statsd(&c)
-	wg.Wait()
-
-	if expected, found := 2.0, res["foobar--foo.count"]; !floatEquals(found, expected) {
+	time.Sleep(time.Second)
+	l.Close()
+	<-got
+	if expected, found := 2.0, res["foobar.foo.count"]; !floatEquals(found, expected) {
 		t.Fatal("bad value:", expected, found)
 	}
 
-	if expected, found := 40.0, res["foobar--bar.count"]; !floatEquals(found, expected) {
+	if expected, found := 40.0, res["foobar.bar.count"]; !floatEquals(found, expected) {
 		t.Fatal("bad value:", expected, found)
 	}
 
-	if expected, found := 4.0, res["foobar--bar.one-minute"]; !floatEquals(found, expected) {
+	if expected, found := 5.0, res["foobar.baz.count"]; !floatEquals(found, expected) {
 		t.Fatal("bad value:", expected, found)
 	}
 
-	if expected, found := 5.0, res["foobar--baz.count"]; !floatEquals(found, expected) {
+	if expected, found := 5000.0, res["foobar.baz.99-percentile"]; !floatEquals(found, expected) {
 		t.Fatal("bad value:", expected, found)
 	}
 
-	if expected, found := 5000.0, res["foobar--baz.99-percentile"]; !floatEquals(found, expected) {
-		t.Fatal("bad value:", expected, found)
-	}
-
-	if expected, found := 3000.0, res["foobar--baz.50-percentile"]; !floatEquals(found, expected) {
+	if expected, found := 3000.0, res["foobar.baz.50-percentile"]; !floatEquals(found, expected) {
 		t.Fatal("bad value:", expected, found)
 	}
 }

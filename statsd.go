@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
+	metrics "github.com/rcrowley/go-metrics"
 )
 
 // StatsDConfig provides a container with
 // configuration parameters for the StatsD exporter
-type StatsDConfig struct {
-	Addr          *net.UDPAddr     // Network address to connect to
+type Config struct {
+	Addr          string           // Network address to connect to
 	Registry      metrics.Registry // Registry to be exported
 	FlushInterval time.Duration    // Flush interval
 	DurationUnit  time.Duration    // Time conversion unit for durations
@@ -27,8 +27,8 @@ type StatsDConfig struct {
 // StatsD is a blocking exporter function which reports metrics in r
 // to a statsd server located at addr, flushing them every d duration
 // and prepending metric names with prefix.
-func StatsD(r metrics.Registry, d time.Duration, prefix string, addr *net.UDPAddr) {
-	StatsDWithConfig(StatsDConfig{
+func StatsD(r metrics.Registry, d time.Duration, prefix string, addr string) {
+	WithConfig(Config{
 		Addr:          addr,
 		Registry:      r,
 		FlushInterval: d,
@@ -40,7 +40,7 @@ func StatsD(r metrics.Registry, d time.Duration, prefix string, addr *net.UDPAdd
 
 // StatsDWithConfig is a blocking exporter function just like StatsD,
 // but it takes a StatsDConfig instead.
-func StatsDWithConfig(c StatsDConfig) {
+func WithConfig(c Config) {
 	for _ = range time.Tick(c.FlushInterval) {
 		if err := statsd(&c); nil != err {
 			log.Println(err)
@@ -48,10 +48,10 @@ func StatsDWithConfig(c StatsDConfig) {
 	}
 }
 
-func statsd(c *StatsDConfig) error {
+func statsd(c *Config) error {
 	du := float64(c.DurationUnit)
 
-	conn, err := net.DialUDP("udp", nil, c.Addr)
+	conn, err := net.Dial("udp", c.Addr)
 
 	if nil != err {
 		return err
